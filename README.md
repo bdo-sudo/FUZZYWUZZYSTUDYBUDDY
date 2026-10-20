@@ -1,6 +1,6 @@
 study tool
 
-How 2 use \
+How 2 use
 
 1.
 ``npm i``
