@@ -1,6 +1,7 @@
 study tool
 
-How 2 use \n
+How 2 use \
+
 1.
 ``npm i``
 
