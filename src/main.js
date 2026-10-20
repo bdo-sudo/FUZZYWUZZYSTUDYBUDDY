@@ -79,9 +79,10 @@ const state = {
     gameX: 0,             // Converted Game X (KAPLAY Units)
     gameY: 0,             // Converted Game Y (KAPLAY Units)
     isUserLookingAway: false,
-    ALPHA: 0.15,          // Smoothing factor (0.1 - 0.2 is usually best)
+    ALPHA: 0.3,           // Smoothing factor (WebGazer already applies a Kalman filter, so keep this light)
     PADDING: 0,          // Boundary buffer
     lastDataTime: Date.now(),
+    lastFaceTime: 0,      // Last time the face mesh produced a fresh detection
     lookAwayStartTime: null,
     isUserLookingAway: false,
     money: 0,           
@@ -90,6 +91,22 @@ const state = {
 const LOOK_AWAY_BUFFER = 2000;
 let paused = 0
 const FACE_LOSS_THRESHOLD = 2000; // ms to wait before declaring user gone
+const FACE_FRESH_MS = 500; // a face detection newer than this counts as "face visible"
+let lastFacePositions = null;
+
+// WebGazer's predictions are null until the first calibration click, so we can't use them to
+// tell whether a face is in view. Instead watch the face mesh: each detection yields a new array.
+function updateFaceSeen(now) {
+    const positions = webgazer.getTracker().getPositions();
+    if (positions && positions !== lastFacePositions) {
+        lastFacePositions = positions;
+        state.lastFaceTime = now;
+    }
+}
+
+function isFaceVisible() {
+    return Date.now() - state.lastFaceTime < FACE_FRESH_MS;
+}
 
 function screenToGamePos(screenX, screenY) {
     const canvas = k.canvas;
@@ -106,8 +123,14 @@ function screenToGamePos(screenX, screenY) {
 
 
 async function startWebGazer() {
+  // Start from a clean model every time: data saved from earlier sessions (different lighting,
+  // seating, screen size) would otherwise be loaded and mixed into this calibration.
+  webgazer.saveDataAcrossSessions(false);
+  webgazer.clearData();
+
   await webgazer.setGazeListener((data) => {
     const now = Date.now();
+    updateFaceSeen(now);
 
     if (!data) {
         if (now - state.lastDataTime > FACE_LOSS_THRESHOLD) {
@@ -140,6 +163,9 @@ async function startWebGazer() {
   handleLookAway(isOffScreen);
   }).begin();
 
+  // By default WebGazer trains on every click and mouse move on the page, assuming the user is
+  // looking at the cursor. That's rarely true here, so only the calibration points record data.
+  webgazer.removeMouseEventListeners();
 
 
   webgazer.showVideoPreview(true)
@@ -190,13 +216,12 @@ scene("calibrate", () => {
     const points = document.querySelectorAll(".calib-point");
 
     let pointsLeft = points.length;
-    const CLICKS_PER_POINT = 10;
+    const CLICKS_PER_POINT = 5;
 
     overlay.style.display = "flex";
 
     beginBtn.onclick = async () => {
         document.getElementById("start-btn-container").style.display = "none";
-        pointsGroup.style.display = "block";
         const fyi = add([pos(0,200),
             text("(Regression model takes a while to load)",{
                 font:"Sans-Serif",
@@ -210,7 +235,14 @@ scene("calibrate", () => {
             })
         ]);
         await startWebGazer();
+
+        // begin() resolves once the camera is on, but the face model is still loading.
+        // Clicks before a face is detected record nothing, so hold the points until then.
+        while (!isFaceVisible()) {
+            await new Promise(r => setTimeout(r, 100));
+        }
         fyi.destroy()
+        pointsGroup.style.display = "block";
     };
 
     points.forEach(pt => {
@@ -218,6 +250,9 @@ scene("calibrate", () => {
         pt.innerText = CLICKS_PER_POINT;
 
         pt.onclick = (e) => {
+            // Don't count a click unless the face is in view, or the point finishes with no data
+            if (!isFaceVisible()) return;
+
             webgazer.recordScreenPosition(e.clientX, e.clientY, 'click');
 
             let clicks = parseInt(pt.getAttribute("data-clicks")) + 1;
